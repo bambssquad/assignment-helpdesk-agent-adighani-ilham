@@ -1,46 +1,72 @@
 """
-Entry point aplikasi FastAPI — IT Helpdesk Assistant.
+Entry point FastAPI: IT Helpdesk Assistant.
 
-Alur endpoint utama:
-  1. Menerima pertanyaan/permintaan dari user
-  2. Meneruskan ke router (router.py) untuk menentukan intent
-  3. Router memanggil RAG (rag.py) atau tool (tools.py) sesuai intent
-  4. Mengembalikan response terstruktur ke client
+  POST /ask  {"query": "..."}  ->  {"status": ..., "intent": ..., "data": ...}
+  GET  /health
+
+Alur: /ask -> router.handle_query -> RAG (intent faq) atau tool call (intent ticket_status).
 """
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+import logging
+from contextlib import asynccontextmanager
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from app import rag
 from app.router import handle_query
 
-app = FastAPI(title="IT Helpdesk Assistant API")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("helpdesk.main")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Bangun index FAISS sekali saat startup. Bila gagal (mis. API key belum diset),
+    # aplikasi tetap hidup: tool call tetap jalan dan index dibangun ulang pada request FAQ pertama.
+    try:
+        rag.build_index()
+        log.info("index FAISS siap")
+    except Exception as e:  # noqa: BLE001
+        log.warning("index belum bisa dibangun saat startup (%s); akan dicoba lagi saat request FAQ", e)
+    yield
+
+
+app = FastAPI(title="IT Helpdesk Assistant API", lifespan=lifespan)
 
 
 class AskRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1, max_length=1000, description="Pertanyaan atau permintaan karyawan")
 
 
 class AskResponse(BaseModel):
-    status: str
-    intent: str
+    status: str  # success | not_found | needs_input | error
+    intent: str  # faq | ticket_status | unknown
     data: str
 
 
 @app.get("/health")
 async def health():
-    """Endpoint sederhana untuk memastikan service berjalan."""
-    return {"status": "ok"}
+    """Memastikan service berjalan; juga melaporkan apakah index RAG sudah siap."""
+    return {"status": "ok", "rag_index_ready": rag.is_ready()}
 
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(request: AskRequest):
-    """
-    Endpoint utama. Menerima pertanyaan bebas dari user (bisa berupa
-    pertanyaan informasi/kebijakan ATAU permintaan cek status tiket),
-    lalu meneruskannya ke router untuk diproses.
-
-    # TODO: tambahkan error handling untuk kondisi LLM gagal merespons
-    # atau intent tidak dapat dikenali (lihat panduan error handling di Sesi 13.4)
-    """
+    """Terima query bebas (informasi/kebijakan ATAU cek status tiket) dan kembalikan response terstruktur."""
     result = await handle_query(request.query)
+    if result["status"] == "error":
+        # intent tidak dikenali -> 400 (kesalahan input); LLM gagal -> 503 (layanan sementara tidak tersedia)
+        code = 400 if result["intent"] == "unknown" else 503
+        return JSONResponse(status_code=code, content=result)
     return AskResponse(**result)
+
+
+@app.exception_handler(Exception)
+async def unhandled_error(_: Request, exc: Exception):
+    log.exception("error tak terduga: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "intent": "unknown", "data": "Terjadi kesalahan internal pada server."},
+    )

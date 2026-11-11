@@ -1,0 +1,33 @@
+name: docker-ci
+on:
+  push:
+    branches: [main]
+    paths: [Dockerfile, "app/**", "data/**", requirements.txt]
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t helpdesk-agent .
+      - name: Run container (tanpa API key)
+        run: docker run -d --name hd -p 8000:8000 helpdesk-agent
+      - name: Tunggu /health
+        run: |
+          for i in $(seq 1 30); do curl -sf localhost:8000/health && break; sleep 2; done
+          curl -sf localhost:8000/health
+      - name: Smoke test endpoint
+        run: |
+          ask() { curl -s -o /tmp/out.json -w "%{http_code}" -X POST localhost:8000/ask -H "Content-Type: application/json" -d "$1"; }
+          code=$(ask '{"query":"Tolong cek status TICKET-0002"}'); cat /tmp/out.json; echo
+          [ "$code" = 200 ] && grep -q Diproses /tmp/out.json
+          code=$(ask '{"query":"Apa status TICKET-9999?"}'); cat /tmp/out.json; echo
+          [ "$code" = 200 ] && grep -q not_found /tmp/out.json
+          code=$(ask '{"query":"Berapa jatah cuti tahunan?"}'); cat /tmp/out.json; echo
+          [ "$code" = 503 ]
+          code=$(ask '{"query":""}'); echo "empty query -> $code"
+          [ "$code" = 422 ]
+      - name: Log container
+        if: always()
+        run: docker logs hd

@@ -1,0 +1,27 @@
+name: import-starter
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import starter repo (one-time)
+        run: |
+          if [ -d app ]; then echo "already imported"; exit 0; fi
+          curl -sSL "https://drive.google.com/uc?export=download&id=1rIUuLysjFun3zjWPUVSiwodm402VbMRN" -o starter.zip
+          mkdir /tmp/s && unzip -q starter.zip -d /tmp/s
+          rm -rf /tmp/s/__MACOSX
+          SRC=/tmp/s
+          if [ "$(ls /tmp/s | wc -l)" = "1" ] && [ -d "/tmp/s/$(ls /tmp/s)" ]; then SRC="/tmp/s/$(ls /tmp/s)"; fi
+          cp -r "$SRC"/. .
+          rm -f starter.zip
+          find . -path ./.git -prune -o -type f -not -path './.github/*' -print | sort
+          git config user.name bambssquad
+          git config user.email 137799776+bambssquad@users.noreply.github.com
+          git add -A
+          git commit -m "Import starter repository"
+          git push
